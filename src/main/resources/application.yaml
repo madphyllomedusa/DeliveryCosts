@@ -1,1 +1,33 @@
-spring.application.name=DeliveryCosts
+spring:
+  autoconfigure:
+    exclude: org.springframework.boot.autoconfigure.http.client.HttpClientAutoConfiguration
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/delivery_cost
+    username: postgres
+    password: 123
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+    database: postgresql
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+
+jwt:
+  secret-key: b5439e7f5737d4751d3e65d05e70e2277b64b5549615e559214b3051431ecb91020694f34622c5bc2b58eacd86bcc95efca33c365cae5564a892c92b11661550
+  expiration: 24h
+
+
+delivery_service_url:
+  yandexLavka: https://lavka.yandex.ru/
+  samokat: https://samokat.ru/
+
