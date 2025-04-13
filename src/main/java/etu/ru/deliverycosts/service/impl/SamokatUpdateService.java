@@ -5,8 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
+import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
+import com.microsoft.playwright.Response;
+import com.microsoft.playwright.options.WaitForSelectorState;
+import com.microsoft.playwright.options.WaitUntilState;
 import etu.ru.deliverycosts.model.entity.Delivery;
 import etu.ru.deliverycosts.model.entity.Product;
 import etu.ru.deliverycosts.model.entity.ProductPrice;
@@ -16,17 +20,22 @@ import etu.ru.deliverycosts.util.samokat.SamokatCategory;
 import etu.ru.deliverycosts.util.samokat.SamokatCategoryWithProductsDto;
 import etu.ru.deliverycosts.util.samokat.SamokatProductDto;
 import etu.ru.deliverycosts.util.samokat.SamokatSubcategoryDto;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class SamokatUpdateService {
 
     private final ObjectMapper objectMapper;
@@ -34,118 +43,133 @@ public class SamokatUpdateService {
     private final DeliveryRepository deliveryRepository;
     private final ImageCaptchaSolver imageCaptchaSolver;
 
-    @Autowired
-    public SamokatUpdateService(
-            ObjectMapper objectMapper,
-            ProductRepository productRepository,
-            DeliveryRepository deliveryRepository,
-            ImageCaptchaSolver imageCaptchaSolver
-    ) {
-        this.objectMapper = objectMapper;
-        this.productRepository = productRepository;
-        this.deliveryRepository = deliveryRepository;
-        this.imageCaptchaSolver = imageCaptchaSolver;
-    }
-
     /**
      * Метод, который автоматически раз в час:
      * 1) Открывает https://samokat.ru/
-     * 2) Перехватывает JSON с /categories/list и /categories/{uuid}
+     * 2) Перехватывает JSON с нужных API-запросов
      * 3) Парсит и сохраняет товары
      */
-    @Scheduled(cron = "0 0 * * * ?")
-    public void updateSamokatData() {
-        log.info("Запуск обновления данных Samokat...");
+@Scheduled(cron = "0 0 * * * ?")
+public void updateSamokatData() {
+    log.info("Начало обновления данных Samokat...");
 
-        // Сюда собираем JSON с /categories/list
-        List<String> categoriesListJsonStorage = new ArrayList<>();
-        // Сюда собираем JSON с /categories/{uuid}
-        List<String> detailedCategoriesJsonStorage = new ArrayList<>();
+    try (Playwright playwright = Playwright.create()) {
+        Browser browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
+                .setHeadless(true)
+                .setArgs(List.of(
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--disable-dev-shm-usage"
+                )));
 
-        try (Playwright playwright = Playwright.create()) {
-            Browser browser = playwright.chromium()
-                    .launch(new BrowserType.LaunchOptions().setHeadless(true));
-            BrowserContext context = browser.newContext();
-            Page page = context.newPage();
+        BrowserContext context = browser.newContext(new Browser.NewContextOptions()
+                .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .setExtraHTTPHeaders(Map.of(
+                        "Accept", "application/json",
+                        "Accept-Language", "ru-RU,ru;q=0.9",
+                        "Origin", "https://samokat.ru",
+                        "Referer", "https://samokat.ru/"
+                ))
+                .setViewportSize(1920, 1080));
 
-            // Перехват ответов
-            page.onResponse(response -> {
-                String url = response.url();
-                try {
-                    // Общий список категорий
-                    if (url.contains("/categories/list")) {
-                        String json = response.text();
-                        log.info("Перехвачен список категорий: {}", json);
-                        categoriesListJsonStorage.add(json);
+        context.addInitScript(
+                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });" +
+                "window.chrome = { runtime: {} };");
 
-                    // Детальная категория (UUID в url)
-                    } else if (url.matches(".*/categories/[0-9a-f\\-]{36}.*")) {
-                        String json = response.text();
-                        log.info("Перехвачена детальная категория: {}", json);
-                        detailedCategoriesJsonStorage.add(json);
-                    }
-                } catch (Exception e) {
-                    log.error("Ошибка при обработке ответа [{}]: {}", url, e.getMessage());
-                }
-            });
+        Page page = context.newPage();
 
-            // Заходим на главную страницу
-            log.info("Открываем страницу https://samokat.ru/...");
-            page.navigate("https://samokat.ru/");
-            page.waitForTimeout(5000);
+        navigateWithRetry(page, "https://samokat.ru/", 3);
 
-            // Проверяем наличие капчи
-            if (page.locator("img[src*='captcha_image.php']").count() > 0) {
-                log.info("Обнаружена капча, начинаем решать...");
-                // Скачиваем картинку капчи
-                byte[] captchaBytes = page.locator("img[src*='captcha_image.php']").screenshot();
-                // Отправляем в 2captcha
-                String solvedCaptchaText = imageCaptchaSolver.solveCaptcha(captchaBytes);
+        String categoriesJson = fetchApiData(page,
+                "https://api-web.samokat.ru/v2/showcases/5636bcd8-07dc-4752-93f5-21c3661fedee/categories/list");
 
-                // Вводим ответ в поле
-                page.fill("input[name='captcha']", solvedCaptchaText);
-                page.click("button[type='submit']");
-                page.waitForTimeout(5000);
-            }
+        List<SamokatCategory> categories = objectMapper.readValue(categoriesJson,
+                new TypeReference<List<SamokatCategory>>() {});
 
-            // Даем время, чтобы все нужные запросы отработали
-            page.waitForTimeout(5000);
+        for (SamokatCategory category : categories) {
+            String categoryUrl = String.format(
+                    "https://api-web.samokat.ru/v2/categories/%s?showcaseUuid=5636bcd8-07dc-4752-93f5-21c3661fedee",
+                    category.getId());
 
-            browser.close();
-        } catch (Exception e) {
-            log.error("Ошибка Playwright: {}", e.getMessage(), e);
+            String categoryJson = fetchApiData(page, categoryUrl);
+            SamokatCategoryWithProductsDto categoryDetail = objectMapper.readValue(
+                    categoryJson, SamokatCategoryWithProductsDto.class);
+
+            parseAndSaveCategoryDetail(categoryDetail);
         }
 
-        // Проверка, что мы что-то реально собрали
-        if (categoriesListJsonStorage.isEmpty() && detailedCategoriesJsonStorage.isEmpty()) {
-            log.warn("Не удалось получить JSON (пусто).");
-            return;
+    } catch (Exception e) {
+        log.error("Критическая ошибка: {}", e.getMessage(), e);
+    }
+}
+
+private String fetchApiData(Page page, String url) throws Exception {
+    AtomicReference<Response> apiResponse = new AtomicReference<>();
+    page.onResponse(response -> {
+        if (response.url().equals(url) && response.status() == 200) {
+            apiResponse.set(response);
         }
+    });
 
-        // Парсим и сохраняем
-        try {
-            // 1) /categories/list
-            for (String catJson : categoriesListJsonStorage) {
-                List<SamokatCategory> catList = objectMapper.readValue(catJson, new TypeReference<>() {});
-                catList.forEach(c -> log.info("Категория: id={}, name={}", c.getId(), c.getName()));
-            }
+    page.mouse().move(300, 300);
+    page.waitForTimeout(1500 + (int)(Math.random() * 2000));
 
-            // 2) /categories/{uuid}
-            for (String detailJson : detailedCategoriesJsonStorage) {
-                SamokatCategoryWithProductsDto detailCat =
-                        objectMapper.readValue(detailJson, SamokatCategoryWithProductsDto.class);
-                parseAndSaveCategoryDetail(detailCat);
-            }
+    page.evaluate("url => fetch(url, {"
+        + "method: 'GET',"
+        + "headers: {"
+        + "  'X-Client-Type': 'web',"
+        + "  'X-Device-Id': 'generated-" + UUID.randomUUID() + "'"
+        + "}"
+        + "})", url);
 
-            log.info("Обновление Samokat завершено успешно.");
-        } catch (Exception e) {
-            log.error("Ошибка при парсинге JSON: {}", e.getMessage(), e);
+    long startTime = System.currentTimeMillis();
+    long timeout = 30000; // 30 секунд
+
+    while (apiResponse.get() == null) {
+        if (System.currentTimeMillis() - startTime > timeout) {
+            throw new RuntimeException("Timeout waiting for API response");
         }
+        page.waitForTimeout(500);
     }
 
-    /**
-     * Разбирает детальную категорию и сохраняет товары.
-     */
+    return apiResponse.get().text();
+}
+
+private void navigateWithRetry(Page page, String url, int maxRetries) {
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            page.navigate(url, new Page.NavigateOptions()
+                    .setWaitUntil(WaitUntilState.NETWORKIDLE));
+
+            handleCaptchaIfPresent(page);
+
+            if(page.locator("body").isVisible()) return;
+
+        } catch (Exception e) {
+            log.warn("Попытка {}: Ошибка навигации: {}", attempt, e.getMessage());
+            page.reload();
+        }
+    }
+    throw new RuntimeException("Не удалось загрузить страницу после " + maxRetries + " попыток");
+}
+
+private void handleCaptchaIfPresent(Page page) {
+    try {
+        Locator captchaLocator = page.locator("img[src*='captcha']");
+        if(captchaLocator.count() > 0) {
+            log.info("Обнаружена капча, решаем...");
+            byte[] imageBytes = captchaLocator.first().screenshot();
+            String solution = imageCaptchaSolver.solveCaptcha(imageBytes);
+            page.fill("input[name='captcha']", solution);
+            page.click("button[type='submit']");
+            page.waitForSelector("img[src*='captcha']",
+                    new Page.WaitForSelectorOptions().setState(WaitForSelectorState.DETACHED));
+        }
+    } catch (Exception e) {
+        log.error("Ошибка обработки капчи: {}", e.getMessage());
+    }
+}
+
     private void parseAndSaveCategoryDetail(SamokatCategoryWithProductsDto detailCat) {
         Delivery samokatDelivery = deliveryRepository.findByName("Samokat")
                 .orElseGet(() -> {
@@ -169,17 +193,12 @@ public class SamokatUpdateService {
         }
     }
 
-    /**
-     * Сохраняем один товар (product + его цены).
-     */
     private void saveProduct(SamokatProductDto dto, Delivery samokatDelivery) {
-        // Для простоты создаём новый Product на каждый заход,
-        // но можно доработать логику, чтобы искать по uuid
         Product product = new Product();
         product.setName(dto.getName());
         product.setDescription("Samokat UUID: " + dto.getUuid());
-
         List<ProductPrice> prices = new ArrayList<>();
+
         if (dto.getPrices() != null) {
             if (dto.getPrices().getCurrent() != null) {
                 ProductPrice priceCurrent = new ProductPrice();
@@ -198,7 +217,6 @@ public class SamokatUpdateService {
         }
         product.setPrices(prices);
         productRepository.save(product);
-
         log.info("Сохранён товар: {} (uuid={})", product.getName(), dto.getUuid());
     }
 
