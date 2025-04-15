@@ -7,6 +7,7 @@ import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
+import com.microsoft.playwright.PlaywrightException;
 import com.microsoft.playwright.options.WaitForSelectorState;
 import com.microsoft.playwright.options.WaitUntilState;
 import etu.ru.deliverycosts.model.entity.Delivery;
@@ -23,8 +24,11 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 @Slf4j
 @Service
@@ -36,72 +40,57 @@ public class SamokatUpdateService {
     private final DeliveryRepository deliveryRepository;
     private final ImageCaptchaSolver imageCaptchaSolver;
 
-    /**
-     * Метод, который автоматически раз в час:
-     * 1) Открывает https://samokat.ru/
-     * 2) Перехватывает JSON с нужных API-запросов
-     * 3) Парсит и сохраняет товары
-     */
+    // Чтобы не парсить один и тот же URL бесконечно
+    private final Set<String> visitedUrls = new HashSet<>();
+
     @Scheduled(cron = "0 0 * * * ?")
     public void updateSamokatData() {
         log.info("Начало обновления данных Samokat...");
 
         try (Playwright playwright = Playwright.create()) {
-        Browser browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
-                .setHeadless(false)
-                .setArgs(List.of(
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-web-security",
-                    "--disable-dev-shm-usage"
-                )));
+            Browser browser = playwright.chromium().launch(
+                new BrowserType.LaunchOptions()
+                    .setHeadless(false)
+                    .setArgs(List.of(
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-web-security",
+                        "--disable-dev-shm-usage"
+                    ))
+            );
 
-        BrowserContext context = browser.newContext(new Browser.NewContextOptions()
-                .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .setExtraHTTPHeaders(Map.of(
+            BrowserContext context = browser.newContext(
+                new Browser.NewContextOptions()
+                    .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .setExtraHTTPHeaders(Map.of(
                         "Accept", "application/json",
                         "Accept-Language", "ru-RU,ru;q=0.9",
                         "Origin", "https://samokat.ru",
                         "Referer", "https://samokat.ru/"
-                ))
-                .setViewportSize(1920, 1080));
+                    ))
+                    .setViewportSize(1200, 800)
+            );
 
             // Скрываем navigator.webdriver
             context.addInitScript(
-                    "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });" +
-                            "window.chrome = { runtime: {} };");
+                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });" +
+                "window.chrome = { runtime: {} };"
+            );
 
             Page page = context.newPage();
+            // Увеличим общий таймаут на 120 секунд
+            page.setDefaultTimeout(120_000);
 
-            // 2) Увеличим таймауты на странице
-            page.setDefaultTimeout(60000); // 60 секунд
-
-            // Переходим на главную, обрабатываем капчу (если есть)
+            // 1) Переходим на главную
             navigateWithRetry(page, "https://samokat.ru/", 3);
 
-            // Небольшая пауза, чтобы всё точно подгрузилось
+            // Небольшая пауза
             page.waitForTimeout(5000);
 
-            // Пример – парсинг ссылок категорий
-            List<String> categoryUrls = parseCategoryLinksFromDom(page);
-            log.info("Найдено категорий: {}", categoryUrls.size());
-
-            for (String catUrl : categoryUrls) {
-                log.info("Переходим в категорию: {}", catUrl);
-                page.navigate(catUrl, new Page.NavigateOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
-                handleCaptchaIfPresent(page);
-
-                // Явно ждём появления карточек товаров (до 60 сек)
-                page.waitForSelector(".ProductCard_root__OCLMl",
-                        new Page.WaitForSelectorOptions().setTimeout(60000));
-
-                // Парсим товары
-                List<SamokatProductDto> products = parseProductsFromDom(page);
-                saveProducts(products);
-
-                // Можно возвращаться назад или заново заходить на главную
-                page.goBack(new Page.GoBackOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
-                handleCaptchaIfPresent(page);
-            }
+            // Предположим, что «верхний уровень» категорий мы тоже можем взять из левого меню,
+            // или просто «что на завтрак» — как вам нужно
+            // Для примера возьмём: /category/chto-na-zavtrak
+            String topCategory = "https://samokat.ru/category/chto-na-zavtrak";
+            parseCategory(page, topCategory, 0);
 
             browser.close();
         } catch (Exception e) {
@@ -110,54 +99,105 @@ public class SamokatUpdateService {
     }
 
     /**
-     * Пример получения ссылок на категории из DOM.
-     * Подберите селектор, который точно соответствует ссылкам категорий в левом меню.
+     * Рекурсивный метод: идём на страницу, смотрим «теги подкатегорий» (CategoryTagsList),
+     * если они есть — для каждой ссылки вызываем parseCategory.
+     * Если нет подкатегорий (или теги не найдены) — парсим товары.
      */
-    private List<String> parseCategoryLinksFromDom(Page page) {
-        // Например, ссылки в левом меню Samokat можно найти по селектору "a.CategoryLink_root__FXcVU"
-        List<Locator> catLinkLocators = page.locator("a.CategoryLink_root__FXcVU").all();
+    private void parseCategory(Page page, String categoryUrl, int depth) {
+        // Проверка, посещали ли уже
+        if (visitedUrls.contains(categoryUrl)) {
+            log.warn("{}Уже посещали URL, пропускаем: {}", indent(depth), categoryUrl);
+            return;
+        }
+        visitedUrls.add(categoryUrl);
 
-        List<String> urls = new ArrayList<>();
-        for (Locator link : catLinkLocators) {
-            String href = link.getAttribute("href");
-            if (href != null && href.startsWith("/category")) {
-                // Превратим в абсолютный URL
-                String fullUrl = page.url().split("/#")[0]; // грубый пример
-                if (href.startsWith("/")) {
-                    fullUrl = "https://samokat.ru" + href;
-                } else {
-                    fullUrl = href;
-                }
-                urls.add(fullUrl);
+        log.info("{}=> Открываем категорию: {}", indent(depth), categoryUrl);
+
+        page.navigate(categoryUrl, new Page.NavigateOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
+        handleCaptchaIfPresent(page);
+
+        // Небольшая пауза на рендер
+        page.waitForTimeout(2000);
+
+        // Пробуем найти подкатегории (теги) в блоке CategoryTagsList
+        List<String> subcats = parseCategoryTags(page);
+
+        if (subcats.isEmpty()) {
+            // Нет подкатегорий в блоке, значит это финальный список товаров
+            log.info("{}   Нет подкатегорий, пытаемся спарсить товары", indent(depth));
+            scrollUntilNoNewProducts(page);
+
+            // Ждём появления карточек
+            try {
+                page.waitForSelector(".ProductCard_root__OCLMl",
+                        new Page.WaitForSelectorOptions().setTimeout(120_000));
+            } catch (PlaywrightException ex) {
+                log.warn("{}   Похоже, не дождались товаров: {}", indent(depth), ex.getMessage());
+            }
+
+            // Парсим товары
+            List<SamokatProductDto> products = parseProductsFromDom(page);
+            log.info("{}   Товаров на странице: {}", indent(depth), products.size());
+            saveProducts(products);
+
+        } else {
+            // Есть подкатегории
+            log.info("{}   Найдено подкатегорий (CategoryTagsList): {}", indent(depth), subcats.size());
+
+            for (String subUrl : subcats) {
+                parseCategory(page, subUrl, depth + 1);
+
+                // Возврат обратно (или заново переходить на categoryUrl)
+                page.navigate(categoryUrl, new Page.NavigateOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
+                handleCaptchaIfPresent(page);
             }
         }
-        return urls;
     }
 
     /**
-     * Пример парсинга товаров со страницы категории.
-     * Вам нужно найти карточки товаров (например, по ".ProductCard_root__OCLMl")
-     * и вытащить название, цены и т.п.
+     * Ищем только те подкатегории, которые лежат в блоке data-fsd="feature/CategoryTagsList".
+     * Внутри него — ссылки a.CategoryLink_root__FXcVU.CategoryTagsList_link__PhUE2
+     */
+    private List<String> parseCategoryTags(Page page) {
+        List<String> result = new ArrayList<>();
+
+        // Селектор для блока с «тегами» под категорией
+        Locator tagsBlock = page.locator("div.CategoryTagsList_root__uCIrg");
+        if (tagsBlock.count() == 0) {
+            return result; // нет «тегов» на странице
+        }
+
+        // Селектор для ссылок внутри этого блока
+        Locator links = tagsBlock.locator("a.CategoryLink_root__FXcVU.CategoryTagsList_link__PhUE2");
+        int count = links.count();
+        for (int i = 0; i < count; i++) {
+            String href = links.nth(i).getAttribute("href");
+            if (href != null && href.startsWith("/category")) {
+                String fullUrl = "https://samokat.ru" + href;
+                result.add(fullUrl);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Парсим товары. Логика такая же, как была.
      */
     private List<SamokatProductDto> parseProductsFromDom(Page page) {
         List<SamokatProductDto> products = new ArrayList<>();
-
         List<Locator> productCards = page.locator(".ProductCard_root__OCLMl").all();
-        for (Locator card : productCards) {
-            // Название
-            String name = card.locator(".ProductCard_name__2VDcL").innerText().trim();
-            // Пример: priceBlock = "119 ₽"
-            String priceBlock = card.locator(".ProductCardActions_text__3Uohy").innerText().trim();
 
-            // Выделяем число из "119 ₽"
-            Integer priceInKopecks = parsePriceToKopecks(priceBlock);
+        for (Locator card : productCards) {
+            String name = card.locator(".ProductCard_name__2VDcL").innerText().trim();
+            Locator priceLocator = card.locator(".ProductCardActions_text__3Uohy");
+            String priceText = (priceLocator.count() > 0) ? priceLocator.innerText().trim() : null;
+
+            Integer priceKopecks = parsePriceToKopecks(priceText);
 
             SamokatProductDto dto = new SamokatProductDto();
             dto.setName(name);
-            // Упростим: dto.setUuid(...) можете сгенерировать или не использовать
-            // Зададим current price (pickup price можно пропустить)
             SamokatPrices pricesDto = new SamokatPrices();
-            pricesDto.setCurrent(priceInKopecks);
+            pricesDto.setCurrent(priceKopecks);
             dto.setPrices(pricesDto);
 
             products.add(dto);
@@ -166,8 +206,7 @@ public class SamokatUpdateService {
     }
 
     private Integer parsePriceToKopecks(String priceText) {
-        // Допустим "119 ₽" -> 11900
-        // Или "1 250 ₽" -> 125000
+        if (priceText == null) return null;
         String digitsOnly = priceText.replaceAll("[^0-9]", "");
         if (digitsOnly.isEmpty()) {
             return null;
@@ -176,10 +215,6 @@ public class SamokatUpdateService {
         return rubles * 100;
     }
 
-    /**
-     * Сохраняем товары в БД. Логика взята из вашего parseAndSaveCategoryDetail,
-     * но упрощена: мы не разбиваем на подкатегории.
-     */
     private void saveProducts(List<SamokatProductDto> productDtos) {
         Delivery samokatDelivery = deliveryRepository.findByName("Samokat")
                 .orElseGet(() -> {
@@ -190,24 +225,57 @@ public class SamokatUpdateService {
                 });
 
         for (SamokatProductDto dto : productDtos) {
-            // Создаем Product
-            Product product = new Product();
-            product.setName(dto.getName());
-            product.setDescription("Parsed from HTML Samokat"); // при желании
-
-            List<ProductPrice> prices = new ArrayList<>();
-            if (dto.getPrices() != null && dto.getPrices().getCurrent() != null) {
-                ProductPrice priceCurrent = new ProductPrice();
-                BigDecimal priceRub = convertKopecksToRubles(dto.getPrices().getCurrent());
-                priceCurrent.setPrice(priceRub);
-                priceCurrent.setService(samokatDelivery);
-                priceCurrent.setProduct(product);
-                prices.add(priceCurrent);
+            String name = dto.getName();
+            if (dto.getPrices() == null || dto.getPrices().getCurrent() == null) {
+                continue;
             }
-            product.setPrices(prices);
+            BigDecimal newPrice = convertKopecksToRubles(dto.getPrices().getCurrent());
 
-            productRepository.save(product);
-            log.info("Сохранён товар: {}", product.getName());
+            // Ищем товар по имени
+            Optional<Product> existingOpt = productRepository.findByName(name);
+            if (existingOpt.isPresent()) {
+                Product existing = existingOpt.get();
+
+                // Ищем цену Samokat
+                Optional<ProductPrice> maybePrice = existing.getPrices().stream()
+                        .filter(p -> p.getService().getId().equals(samokatDelivery.getId()))
+                        .findFirst();
+
+                if (maybePrice.isPresent()) {
+                    ProductPrice oldPrice = maybePrice.get();
+                    if (oldPrice.getPrice().compareTo(newPrice) != 0) {
+                        log.info("Обновляем цену '{}' с {} на {}", name, oldPrice.getPrice(), newPrice);
+                        oldPrice.setPrice(newPrice);
+                        productRepository.save(existing);
+                    }
+                } else {
+                    ProductPrice pp = new ProductPrice();
+                    pp.setPrice(newPrice);
+                    pp.setService(samokatDelivery);
+                    pp.setProduct(existing);
+
+                    existing.getPrices().add(pp);
+                    productRepository.save(existing);
+                    log.info("Добавили цену Samokat для '{}': {}", name, newPrice);
+                }
+            } else {
+                // Создаём новый товар
+                Product newProd = new Product();
+                newProd.setName(name);
+                newProd.setDescription("Parsed from CategoryTagsList");
+
+                ProductPrice pp = new ProductPrice();
+                pp.setPrice(newPrice);
+                pp.setService(samokatDelivery);
+                pp.setProduct(newProd);
+
+                List<ProductPrice> prices = new ArrayList<>();
+                prices.add(pp);
+                newProd.setPrices(prices);
+
+                productRepository.save(newProd);
+                log.info("Создали новый товар '{}' = {}", name, newPrice);
+            }
         }
     }
 
@@ -216,11 +284,24 @@ public class SamokatUpdateService {
         return BigDecimal.valueOf(kopecks).divide(BigDecimal.valueOf(100));
     }
 
-    /**
-     * Переход с ретраем + обработка капчи.
-     */
+    // Скроллим вниз, пока количество товаров растёт, либо 3 раза подряд не растёт
+    private void scrollUntilNoNewProducts(Page page) {
+        int sameCountTimes = 0;
+        while (sameCountTimes < 3) {
+            int currentCount = page.locator(".ProductCard_root__OCLMl").count();
+            page.evaluate("window.scrollBy(0, 3000)");
+            page.waitForTimeout(2000);
+            int newCount = page.locator(".ProductCard_root__OCLMl").count();
+            if (newCount <= currentCount) {
+                sameCountTimes++;
+            } else {
+                sameCountTimes = 0;
+            }
+        }
+    }
+
     private void navigateWithRetry(Page page, String url, int maxRetries) {
-        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+        for (int i = 1; i <= maxRetries; i++) {
             try {
                 page.navigate(url, new Page.NavigateOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
                 handleCaptchaIfPresent(page);
@@ -229,16 +310,13 @@ public class SamokatUpdateService {
                     return;
                 }
             } catch (Exception e) {
-                log.warn("Попытка {}: Ошибка навигации: {}", attempt, e.getMessage());
+                log.warn("Попытка {}: Ошибка навигации: {}", i, e.getMessage());
                 page.reload(new Page.ReloadOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
             }
         }
         throw new RuntimeException("Не удалось загрузить страницу после " + maxRetries + " попыток");
     }
 
-    /**
-     * Капча — та же логика, что и у вас.
-     */
     private void handleCaptchaIfPresent(Page page) {
         try {
             Locator captchaLocator = page.locator("img[src*='captcha']");
@@ -250,11 +328,18 @@ public class SamokatUpdateService {
                 page.click("button[type='submit']");
 
                 page.waitForSelector("img[src*='captcha']",
-                        new Page.WaitForSelectorOptions().setState(WaitForSelectorState.DETACHED));
+                        new Page.WaitForSelectorOptions()
+                                .setState(WaitForSelectorState.DETACHED)
+                                .setTimeout(120_000));
+
                 log.info("Капча решена и исчезла.");
             }
         } catch (Exception e) {
             log.error("Ошибка обработки капчи: {}", e.getMessage());
         }
+    }
+
+    private String indent(int depth) {
+        return "  ".repeat(Math.max(0, depth));
     }
 }
