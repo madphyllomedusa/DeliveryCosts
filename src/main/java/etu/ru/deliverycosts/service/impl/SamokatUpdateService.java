@@ -9,6 +9,7 @@ import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.PlaywrightException;
 import com.microsoft.playwright.options.Cookie;
+import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitForSelectorState;
 import com.microsoft.playwright.options.WaitUntilState;
 import etu.ru.deliverycosts.model.entity.Delivery;
@@ -263,31 +264,29 @@ private List<SamokatProductDto> parseProductsFromDom(Page page) {
 }
 
 /**
- * Парсим цену с учётом скидок.
+ * Забираем из карточки только «актуальную» цену:
+ * Samokat в одном и том же контейнере рисует сначала старую,
+ * потом новую цену. Берём последнюю <span>.
  */
 private Integer parsePriceToKopecks(Locator card) {
-    Locator discountedPriceLocator = card.locator(".ProductCard_price__actual");
-    Locator regularPriceLocator = card.locator(".ProductCard_price__old");
-
-    String priceText;
-
-    if (discountedPriceLocator.count() > 0) {
-        priceText = discountedPriceLocator.first().innerText().trim();
-    } else if (regularPriceLocator.count() > 0) {
-        priceText = regularPriceLocator.first().innerText().trim();
-    } else {
-        // fallback на старую логику, если специальные селекторы не найдены
-        Locator fallbackPriceLocator = card.locator(".ProductCardActions_text__3Uohy");
-        int priceCount = fallbackPriceLocator.count();
-        if (priceCount > 0) {
-            priceText = fallbackPriceLocator.nth(priceCount - 1).innerText().trim();
-        } else {
-            priceText = null;
-        }
+    // в блоке .ProductCardActions_text__3Uohy лежит несколько <span>
+    Locator spans = card.locator(".ProductCardActions_text__3Uohy span");
+    int count = spans.count();
+    if (count == 0) {
+        return null;  // цены нет
     }
 
-    return convertPriceTextToKopecks(priceText);
+    // последний <span> — это действующая цена
+    String priceText = spans.nth(count - 1).innerText().trim();
+
+    // переводим «231 ₽» → 23100
+    priceText = priceText.replaceAll("[^0-9]", "");
+    if (priceText.isEmpty()) {
+        return null;
+    }
+    return Integer.parseInt(priceText) * 100;
 }
+
 
 /**
  * Преобразование цены из текста в копейки.
@@ -399,6 +398,8 @@ private Integer convertPriceTextToKopecks(String priceText) {
                 page.navigate(url, new Page.NavigateOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
                 handleCaptchaIfPresent(page);
 
+                refreshBrokenPage(page);          // ← новый вызов
+
                 if (page.locator("body").isVisible()) {
                     return;
                 }
@@ -476,6 +477,24 @@ private Integer convertPriceTextToKopecks(String priceText) {
             page.goBack(new Page.GoBackOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
         }
     }
+
+    private void refreshBrokenPage(Page page) {
+    // Проверяем заголовок ошибки или саму кнопку
+    Locator errorHeader = page.locator("text=Простите, мы сломались");
+    Locator refreshBtn  = page.locator("button:has-text(\"Обновить\")");
+
+    if (errorHeader.count() > 0 || refreshBtn.count() > 0) {
+        // пауза 1‑2 сек
+        page.waitForTimeout(1000 + new Random().nextInt(1000));
+
+        if (refreshBtn.count() > 0 && refreshBtn.first().isVisible()) {
+            refreshBtn.first().click();
+            // ждём полной загрузки
+            page.waitForLoadState(LoadState.NETWORKIDLE);
+            log.info("Страница перезагружена через кнопку «Обновить».");
+        }
+    }
+}
 
 
     private String indent(int depth) {
