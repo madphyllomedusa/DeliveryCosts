@@ -35,6 +35,7 @@ import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -60,7 +61,9 @@ public class SamokatUpdateService {
                             .setArgs(List.of(
                                     "--disable-blink-features=AutomationControlled",
                                     "--disable-web-security",
-                                    "--disable-dev-shm-usage"
+                                    "--disable-dev-shm-usage",
+                                    "--blink-settings=imagesEnabled=false"
+
                             ))
             );
 
@@ -103,6 +106,16 @@ public class SamokatUpdateService {
 
             context.addCookies(List.of(cookie));
 
+            context.route("**/*", route -> {
+                String type = route.request().resourceType();
+                // image | media | font — это то, что реально тормозит
+                if ("image".equals(type) || "media".equals(type) || "font".equals(type)) {
+                    route.abort();           // вырезаем из трафика
+                } else {
+                    route.resume();          // всё остальное (html, css, js, xhr …) пропускаем
+                }
+            });
+
 
             Page page = context.newPage();
             // Увеличим общий таймаут на 120 секунд
@@ -118,10 +131,14 @@ public class SamokatUpdateService {
 
             // 3) Рекурсивно обходим каждую найденную категорию
             Collections.shuffle(mainCategories);
+            int done = 0;
             for (String catUrl : mainCategories) {
+                done++;
+                log.info("Категория {}/{}: {}", done, mainCategories.size(), catUrl);
                 parseCategory(page, catUrl, 0);
             }
 
+            log.info("Обработаны все категорий.");
 
             browser.close();
         } catch (Exception e) {
@@ -171,7 +188,7 @@ public class SamokatUpdateService {
 
         log.info("{}=> Открываем категорию: {}", indent(depth), categoryUrl);
 
-        page.navigate(categoryUrl, new Page.NavigateOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
+        page.navigate(categoryUrl, new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
         handleCaptchaIfPresent(page);
 
         // Небольшая пауза на рендер
@@ -207,7 +224,7 @@ public class SamokatUpdateService {
                 parseCategory(page, subUrl, depth + 1);
 
                 // Возврат обратно или заново переходим на исходный categoryUrl
-                page.navigate(categoryUrl, new Page.NavigateOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
+                page.navigate(categoryUrl, new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
                 handleCaptchaIfPresent(page);
             }
         }
@@ -237,66 +254,66 @@ public class SamokatUpdateService {
         return result;
     }
 
- /**
- * Парсим товары. Логика обновлена: отдельно парсим цену со скидкой и без скидки.
- */
-private List<SamokatProductDto> parseProductsFromDom(Page page) {
-    List<SamokatProductDto> products = new ArrayList<>();
-    List<Locator> productCards = page.locator(".ProductCard_root__OCLMl").all();
+    /**
+     * Парсим товары. Логика обновлена: отдельно парсим цену со скидкой и без скидки.
+     */
+    private List<SamokatProductDto> parseProductsFromDom(Page page) {
+        List<SamokatProductDto> products = new ArrayList<>();
+        List<Locator> productCards = page.locator(".ProductCard_root__OCLMl").all();
 
-    for (Locator card : productCards) {
-        // Название
-        String name = card.locator(".ProductCard_name__2VDcL").innerText().trim();
+        for (Locator card : productCards) {
+            // Название
+            String name = card.locator(".ProductCard_name__2VDcL").innerText().trim();
 
-        // Используем обновлённый метод парсинга цены
-        Integer priceKopecks = parsePriceToKopecks(card);
+            // Используем обновлённый метод парсинга цены
+            Integer priceKopecks = parsePriceToKopecks(card);
 
-        SamokatProductDto dto = new SamokatProductDto();
-        dto.setName(name);
+            SamokatProductDto dto = new SamokatProductDto();
+            dto.setName(name);
 
-        SamokatPrices pricesDto = new SamokatPrices();
-        pricesDto.setCurrent(priceKopecks);
-        dto.setPrices(pricesDto);
+            SamokatPrices pricesDto = new SamokatPrices();
+            pricesDto.setCurrent(priceKopecks);
+            dto.setPrices(pricesDto);
 
-        products.add(dto);
-    }
-    return products;
-}
-
-/**
- * Забираем из карточки только «актуальную» цену:
- * Samokat в одном и том же контейнере рисует сначала старую,
- * потом новую цену. Берём последнюю <span>.
- */
-private Integer parsePriceToKopecks(Locator card) {
-    // в блоке .ProductCardActions_text__3Uohy лежит несколько <span>
-    Locator spans = card.locator(".ProductCardActions_text__3Uohy span");
-    int count = spans.count();
-    if (count == 0) {
-        return null;  // цены нет
+            products.add(dto);
+        }
+        return products;
     }
 
-    // последний <span> — это действующая цена
-    String priceText = spans.nth(count - 1).innerText().trim();
+    /**
+     * Забираем из карточки только «актуальную» цену:
+     * Samokat в одном и том же контейнере рисует сначала старую,
+     * потом новую цену. Берём последнюю <span>.
+     */
+    private Integer parsePriceToKopecks(Locator card) {
+        // в блоке .ProductCardActions_text__3Uohy лежит несколько <span>
+        Locator spans = card.locator(".ProductCardActions_text__3Uohy span");
+        int count = spans.count();
+        if (count == 0) {
+            return null;  // цены нет
+        }
 
-    // переводим «231 ₽» → 23100
-    priceText = priceText.replaceAll("[^0-9]", "");
-    if (priceText.isEmpty()) {
-        return null;
+        // последний <span> — это действующая цена
+        String priceText = spans.nth(count - 1).innerText().trim();
+
+        // переводим «231 ₽» → 23100
+        priceText = priceText.replaceAll("[^0-9]", "");
+        if (priceText.isEmpty()) {
+            return null;
+        }
+        return Integer.parseInt(priceText) * 100;
     }
-    return Integer.parseInt(priceText) * 100;
-}
 
 
-/**
- * Преобразование цены из текста в копейки.
- */
-private Integer convertPriceTextToKopecks(String priceText) {
-    if (priceText == null) return null;
-    priceText = priceText.replaceAll("[^0-9]", "");
-    if (priceText.isEmpty()) return null;
-    return Integer.parseInt(priceText) * 100;
-}
+    /**
+     * Преобразование цены из текста в копейки.
+     */
+    private Integer convertPriceTextToKopecks(String priceText) {
+        if (priceText == null) return null;
+        priceText = priceText.replaceAll("[^0-9]", "");
+        if (priceText.isEmpty()) return null;
+        return Integer.parseInt(priceText) * 100;
+    }
 
     /**
      * Сохранение списка товаров в БД, привязка к доставке "Samokat".
@@ -348,7 +365,7 @@ private Integer convertPriceTextToKopecks(String priceText) {
                 // Создаём новый товар
                 Product newProd = new Product();
                 newProd.setName(name);
-                newProd.setDescription("Parsed from CategoryTagsList");
+                newProd.setDescription("Parsed from Samokat");
 
                 ProductPrice pp = new ProductPrice();
                 pp.setPrice(newPrice);
@@ -395,17 +412,17 @@ private Integer convertPriceTextToKopecks(String priceText) {
     private void navigateWithRetry(Page page, String url, int maxRetries) {
         for (int i = 1; i <= maxRetries; i++) {
             try {
-                page.navigate(url, new Page.NavigateOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
+                page.navigate(url, new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
                 handleCaptchaIfPresent(page);
 
-                refreshBrokenPage(page);          // ← новый вызов
+                refreshBrokenPage(page);
 
                 if (page.locator("body").isVisible()) {
                     return;
                 }
             } catch (Exception e) {
                 log.warn("Попытка {}: Ошибка навигации: {}", i, e.getMessage());
-                page.reload(new Page.ReloadOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
+                page.reload(new Page.ReloadOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
             }
         }
         throw new RuntimeException("Не удалось загрузить страницу после " + maxRetries + " попыток");
@@ -474,27 +491,27 @@ private Integer convertPriceTextToKopecks(String priceText) {
             }
 
             // возвращаемся назад
-            page.goBack(new Page.GoBackOptions().setWaitUntil(WaitUntilState.NETWORKIDLE));
+            page.goBack(new Page.GoBackOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
         }
     }
 
     private void refreshBrokenPage(Page page) {
-    // Проверяем заголовок ошибки или саму кнопку
-    Locator errorHeader = page.locator("text=Простите, мы сломались");
-    Locator refreshBtn  = page.locator("button:has-text(\"Обновить\")");
+        // Проверяем заголовок ошибки или саму кнопку
+        Locator errorHeader = page.locator("text=Простите, мы сломались");
+        Locator refreshBtn = page.locator("button:has-text(\"Обновить\")");
 
-    if (errorHeader.count() > 0 || refreshBtn.count() > 0) {
-        // пауза 1‑2 сек
-        page.waitForTimeout(1000 + new Random().nextInt(1000));
+        if (errorHeader.count() > 0 || refreshBtn.count() > 0) {
+            // пауза 1‑2 сек
+            page.waitForTimeout(1000 + new Random().nextInt(1000));
 
-        if (refreshBtn.count() > 0 && refreshBtn.first().isVisible()) {
-            refreshBtn.first().click();
-            // ждём полной загрузки
-            page.waitForLoadState(LoadState.NETWORKIDLE);
-            log.info("Страница перезагружена через кнопку «Обновить».");
+            if (refreshBtn.count() > 0 && refreshBtn.first().isVisible()) {
+                refreshBtn.first().click();
+                // ждём полной загрузки
+                page.waitForLoadState(LoadState.DOMCONTENTLOADED);
+                log.info("Страница перезагружена через кнопку «Обновить».");
+            }
         }
     }
-}
 
 
     private String indent(int depth) {
