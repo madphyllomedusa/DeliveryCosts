@@ -2,7 +2,14 @@ package etu.ru.deliverycosts.service.impl;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.microsoft.playwright.*;
+import com.microsoft.playwright.Browser;
+import com.microsoft.playwright.BrowserContext;
+import com.microsoft.playwright.BrowserType;
+import com.microsoft.playwright.Locator;
+import com.microsoft.playwright.Page;
+import com.microsoft.playwright.Playwright;
+import com.microsoft.playwright.Response;
+import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitUntilState;
 import etu.ru.deliverycosts.model.entity.Delivery;
 import etu.ru.deliverycosts.model.entity.Product;
@@ -14,7 +21,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.Collections;
+import java.util.List;
+import java.util.Queue;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 @Service
@@ -45,12 +55,17 @@ public class FiveKaUpdateService {
         try (Playwright pw = Playwright.create()) {
             Browser browser = pw.chromium().launch(new BrowserType.LaunchOptions().setHeadless(false));
             BrowserContext ctx = browser.newContext();
+
+            ctx.setDefaultNavigationTimeout(30_000);
+            ctx.setDefaultTimeout(30_000);
+
             page = ctx.newPage();
 
             // перехватываем все ответы — там лежат категории и товары
             ctx.onResponse(this::intercept);
 
-            page.navigate("https://5ka.ru/catalog");
+                page.navigate("https://5ka.ru/catalog",
+                        new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
             log.info("[5KA] Открыли каталог, ждём сетевые ответы с категориями …");
             page.waitForTimeout(15_000);
 
@@ -58,7 +73,7 @@ public class FiveKaUpdateService {
             for (String catId : categories) {
                 log.info("[5KA] ➡️  Переходим в категорию {}", catId);
                 fetchProducts(catId);
-                Thread.sleep(10_000); // маленькая пауза, чтобы не спамить API
+                page.waitForTimeout(10_000);
             }
             log.info("[5KA] ✅  Парсинг завершён, закрываем браузер.");
         } catch (Exception e) {
@@ -136,7 +151,7 @@ public class FiveKaUpdateService {
         // 2. ждём XHR с товарами именно для этой категории
         Response resp = page.waitForResponse(r -> r.url().contains(apiPart) && r.status() == 200, () -> {
             link.click();           // триггер — клик в меню
-            page.mouse().wheel(0, 2000); // чуть прокручиваем, чтобы ленивые XHR догрузились
+            scrollUntilNoNewProducts(page);
         });
 
         if (resp == null) {
@@ -149,7 +164,7 @@ public class FiveKaUpdateService {
 
         // 3. возвращаемся обратно к списку категорий
         page.goBack(new Page.GoBackOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
-        page.waitForTimeout(3000);
+        page.waitForLoadState(LoadState.DOMCONTENTLOADED);
     }
 
     private void handleProductsResponse(byte[] body) {
@@ -206,10 +221,24 @@ public class FiveKaUpdateService {
                 Product newProd = new Product();
                 newProd.setName(name);
                 newProd.setDescription("Parsed from 5ka");
-                ProductPrice pp = new ProductPrice(null, newProd, delivery, price);
-                newProd.setPrices(Collections.singletonList(pp));
+                newProd.getPrices().add(new ProductPrice(null, newProd, delivery, price));
                 productRepository.save(newProd);
             });
+        }
+    }
+
+        private void scrollUntilNoNewProducts(Page page) {
+        int sameCountTimes = 0;
+        while (sameCountTimes < 3) {
+            int currentCount = page.locator(".productFilterGrid_cardContainer__oyUJZ").count();
+            page.evaluate("window.scrollBy(0, 3000)");
+            page.waitForTimeout(2000);
+            int newCount = page.locator(".productFilterGrid_cardContainer__oyUJZ").count();
+            if (newCount <= currentCount) {
+                sameCountTimes++;
+            } else {
+                sameCountTimes = 0;
+            }
         }
     }
 }
