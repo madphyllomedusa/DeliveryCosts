@@ -18,6 +18,7 @@ import etu.ru.deliverycosts.model.entity.Product;
 import etu.ru.deliverycosts.model.entity.ProductPrice;
 import etu.ru.deliverycosts.repository.DeliveryRepository;
 import etu.ru.deliverycosts.repository.ProductRepository;
+import etu.ru.deliverycosts.service.ProductService;
 import etu.ru.deliverycosts.util.samokat.SamokatCategoryInfo;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -39,6 +40,7 @@ public class SamokatUpdateService {
 
     private final ObjectMapper objectMapper;
     private final ProductRepository productRepository;
+    private final ProductService productService;
     private final DeliveryRepository deliveryRepository;
 
     private static final String BASE_API = "https://api-web.samokat.ru/v2/showcases/";
@@ -49,7 +51,7 @@ public class SamokatUpdateService {
 
     //@Scheduled(cron = "0 0 * * * ?")
     public void updateSamokatData() {
-        log.info("[SAMOKAT] ▶️  Начало обновления Samokat...");
+        log.info("[Самокат] ▶️  Начало обновления Самокат...");
         try (Playwright pw = Playwright.create()) {
             Browser browser = pw.chromium()
                 .launch(new BrowserType.LaunchOptions().setHeadless(false));
@@ -72,7 +74,7 @@ public class SamokatUpdateService {
             }
 
             if (!mainParsed) {
-                log.warn("[SAMOKAT] MAIN XHR не перехвачен за {} секунд, продолжаем с теми категориями, что есть", waitCount);
+                log.warn("[Самокат] MAIN XHR не перехвачен за {} секунд, продолжаем с теми категориями, что есть", waitCount);
             }
 
             List<SamokatCategoryInfo> toProcess = new ArrayList<>(categories);
@@ -82,14 +84,14 @@ public class SamokatUpdateService {
             }
 
             browser.close();
-            log.info("[SAMOKAT] ✅  Обновление завершено");
+            log.info("[Самокат] ✅  Обновление завершено");
         } catch (Exception e) {
-            log.error("[SAMOKAT] ❌ Ошибка обновления", e);
+            log.error("[Самокат] ❌ Ошибка обновления", e);
         }
     }
 
     private void processCategory(SamokatCategoryInfo cat) {
-        log.info("[SAMOKAT] ➡️ Обрабатываем {} (slug={})", cat.getId(), cat.getSlug());
+        log.info("[Самокат] ➡️ Обрабатываем {} (slug={})", cat.getId(), cat.getSlug());
         try {
             Response prodResp = page.waitForResponse(
                 r -> r.url().contains(BASE_API) && r.url().contains(cat.getId()) && r.status() == 200,
@@ -99,10 +101,9 @@ public class SamokatUpdateService {
                     handleBrokenPage(page);
                     emulateHumanBehavior(page);
                     scrollUntilNoNewProducts(page);
-                    emulateHumanBehavior(page);
                 }
             );
-            log.info("[SAMOKAT] PRODUCTS XHR: {}", prodResp.url());
+            log.info("[Самокат] PRODUCTS XHR: {}", prodResp.url());
 
             handleProductsResponse(prodResp.body());
 
@@ -110,7 +111,7 @@ public class SamokatUpdateService {
             page.waitForLoadState(LoadState.NETWORKIDLE);
             page.waitForTimeout(5000 + rnd.nextInt(5000));
         } catch (PlaywrightException e) {
-            log.warn("[SAMOKAT] Категория {} сломалась, пропускаем: {}", cat.getSlug(), e.getMessage());
+            log.warn("[Самокат] Категория {} сломалась, пропускаем: {}", cat.getSlug(), e.getMessage());
         }
     }
 
@@ -120,11 +121,11 @@ public class SamokatUpdateService {
         }
         try {
             mainParsed = true;
-            log.info("[SAMOKAT] [XHR] MAIN перехвачен: {}", resp.url());
+            log.info("[Самокат] [XHR] MAIN перехвачен: {}", resp.url());
             List<SamokatCategoryInfo> parsed = parseMainCategories(resp.body());
             categories.addAll(parsed);
         } catch (Exception ex) {
-            log.error("[SAMOKAT] Ошибка парсинга MAIN", ex);
+            log.error("[Самокат] Ошибка парсинга MAIN", ex);
         }
     }
 
@@ -141,7 +142,7 @@ public class SamokatUpdateService {
                 String slug = sub.path("slug").asText(null);
                 if (uuid != null && slug != null) {
                     out.add(new SamokatCategoryInfo(uuid, slug));
-                    log.info("[SAMOKAT] ➕ подкатегория {} (slug={})", uuid, slug);
+                    log.info("[Самокат] ➕ подкатегория {} (slug={})", uuid, slug);
                 }
             }
         }
@@ -165,7 +166,7 @@ public class SamokatUpdateService {
                 }
             }
         } catch (Exception e) {
-            log.error("[SAMOKAT] Ошибка обработки продуктов", e);
+            log.error("[Самокат] Ошибка обработки продуктов", e);
         }
     }
 
@@ -180,31 +181,12 @@ public class SamokatUpdateService {
     }
 
     private void upsertProduct(String name, BigDecimal price) {
-        Delivery del = deliveryRepository.findByName("Samokat").orElseGet(() -> {
-            Delivery d = new Delivery(); d.setName("Samokat"); d.setUrl("https://samokat.ru/");
+        Delivery del = deliveryRepository.findByName("Самокат").orElseGet(() -> {
+            Delivery d = new Delivery(); d.setName("Самокат"); d.setUrl("https://samokat.ru/");
             return deliveryRepository.save(d);
         });
-        productRepository.findByNameCleaned(name).ifPresentOrElse(prod -> {
-            prod.getPrices().stream()
-                .filter(pp -> pp.getService().getId().equals(del.getId()))
-                .findFirst().ifPresentOrElse(pp -> {
-                    if (pp.getPrice().compareTo(price) != 0) {
-                        pp.setPrice(price);
-                        productRepository.save(prod);
-                        log.info("[SAMOKAT] Обновили {}: {}→{}", name, pp.getPrice(), price);
-                    }
-                }, () -> {
-                    prod.setDescription(prod.getDescription() + ", Parsed from Samokat");
-                    prod.getPrices().add(new ProductPrice(null, prod, del, price));
-                    productRepository.save(prod);
-                    log.info("[SAMOKAT] Добавили цену {}: {}", name, price);
-                });
-        }, () -> {
-            Product np = new Product(); np.setName(name); np.setDescription("Parsed from Samokat");
-            np.getPrices().add(new ProductPrice(null, np, del, price));
-            productRepository.save(np);
-            log.info("[SAMOKAT] Создали {}: {}", name, price);
-        });
+
+        productService.updateOrSaveProduct(del, name, price);
     }
 
     private void scrollUntilNoNewProducts(Page page) {
@@ -233,13 +215,13 @@ public class SamokatUpdateService {
         Locator errorContainer = page.locator("div[class*='ErrorScreen_container']");
         Locator refreshBtn = page.locator(".Button_control__V__YD");
         if (errorContainer.count() > 0 && errorContainer.first().isVisible()) {
-            log.warn("[SAMOKAT] Обнаружен экран ошибки, пробуем обновить страницу");
+            log.warn("[Самокат] Обнаружен экран ошибки, пробуем обновить страницу");
             if (refreshBtn.count() > 0 && refreshBtn.first().isVisible()) {
                 refreshBtn.first().click();
-                log.info("[SAMOKAT] Нажали кнопку 'Обновить'");
+                log.info("[Самокат] Нажали кнопку 'Обновить'");
             } else {
                 page.reload(new Page.ReloadOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
-                log.info("[SAMOKAT] Перезагрузили страницу");
+                log.info("[Самокат] Перезагрузили страницу");
             }
             try {
                 page.waitForSelector("div[class*='ErrorScreen_container']", new Page.WaitForSelectorOptions()
@@ -247,7 +229,7 @@ public class SamokatUpdateService {
                     .setTimeout(60_000)
                 );
             } catch (PlaywrightException ex) {
-                log.warn("[SAMOKAT] Экран ошибки не исчез после ожидания: {}", ex.getMessage());
+                log.warn("[Самокат] Экран ошибки не исчез после ожидания: {}", ex.getMessage());
             }
             emulateHumanBehavior(page);
         }

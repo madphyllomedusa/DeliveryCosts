@@ -16,6 +16,7 @@ import etu.ru.deliverycosts.model.entity.Product;
 import etu.ru.deliverycosts.model.entity.ProductPrice;
 import etu.ru.deliverycosts.repository.DeliveryRepository;
 import etu.ru.deliverycosts.repository.ProductRepository;
+import etu.ru.deliverycosts.service.ProductService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -35,6 +36,7 @@ public class FiveKaUpdateService {
 
     private final ObjectMapper objectMapper;
     private final ProductRepository productRepository;
+    private final ProductService productService;
     private final DeliveryRepository deliveryRepository;
 
     /**
@@ -48,7 +50,7 @@ public class FiveKaUpdateService {
     private final List<String> categories = new CopyOnWriteArrayList<>();
 
     public void updateFiveKaData() {
-        log.info("[5KA] ▶️  Старт парсинга каталога …");
+        log.info("[Пятерочка] ▶️  Старт парсинга каталога …");
         try (Playwright pw = Playwright.create()) {
             Browser browser = pw.chromium().launch(new BrowserType.LaunchOptions().setHeadless(false));
             BrowserContext ctx = browser.newContext();
@@ -63,18 +65,18 @@ public class FiveKaUpdateService {
 
             page.navigate("https://5ka.ru/catalog",
                     new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
-            log.info("[5KA] Открыли каталог, ждём сетевые ответы с категориями …");
+            log.info("[Пятерочка] Открыли каталог, ждём сетевые ответы с категориями …");
             page.waitForTimeout(15_000);
 
             Collections.shuffle(categories);
             for (String catId : categories) {
-                log.info("[5KA] ➡️  Переходим в категорию {}", catId);
+                log.info("[Пятерочка] ➡️  Переходим в категорию {}", catId);
                 fetchProducts(catId);
                 page.waitForTimeout(10_000);
             }
-            log.info("[5KA] ✅  Парсинг завершён, закрываем браузер.");
+            log.info("[Пятерочка] ✅  Парсинг завершён, закрываем браузер.");
         } catch (Exception e) {
-            log.error("[5KA] ❌ Общая ошибка обновления", e);
+            log.error("[Пятерочка] ❌ Общая ошибка обновления", e);
         }
     }
 
@@ -84,16 +86,16 @@ public class FiveKaUpdateService {
         try {
             // ответ со списком категорий (без /products)
             if (url.contains("/categories") && !url.contains("/products") && resp.status() == 200) {
-                log.info("[5KA][XHR] прислали блок категорий: {}", url);
+                log.info("[Пятерочка][XHR] прислали блок категорий: {}", url);
                 handleCategoryResponse(resp.body());
             }
             // ответ со списком товаров
             if (url.contains("/products") && resp.status() == 200) {
-                log.info("[5KA][XHR] прислали блок товаров: {}", url);
+                log.info("[Пятерочка][XHR] прислали блок товаров: {}", url);
                 handleProductsResponse(resp.body());
             }
         } catch (Exception ex) {
-            log.error("[5KA] ❌ Ошибка обработки ответа {}", url, ex);
+            log.error("[Пятерочка] ❌ Ошибка обработки ответа {}", url, ex);
         }
     }
 
@@ -124,12 +126,12 @@ public class FiveKaUpdateService {
                     }
                     if (!categories.contains(id)) {
                         categories.add(id);
-                        log.info("[5KA] ➕ Найдена категория '{}' ({})", name, id);
+                        log.info("[Пятерочка] ➕ Найдена категория '{}' ({})", name, id);
                     }
                 }
             }
         } catch (Exception e) {
-            log.error("[5KA] ❌ Ошибка разбора категорий", e);
+            log.error("[Пятерочка] ❌ Ошибка разбора категорий", e);
         }
     }
 
@@ -139,7 +141,7 @@ public class FiveKaUpdateService {
         Locator link = page.locator(String.format("a[data-category-id='%s'], a[href*='%s']", categoryId, categoryId)).first();
 
         if (link.count() == 0) {
-            log.warn("[5KA] ⚠️  Не нашли DOM-ссылку для categoryId={} — пропускаем", categoryId);
+            log.warn("[Пятерочка] ⚠️  Не нашли DOM-ссылку для categoryId={} — пропускаем", categoryId);
             return;
         }
 
@@ -152,11 +154,11 @@ public class FiveKaUpdateService {
         });
 
         if (resp == null) {
-            log.warn("[5KA] ⚠️  Не дождались products-XHR для categoryId={}", categoryId);
+            log.warn("[Пятерочка] ⚠️  Не дождались products-XHR для categoryId={}", categoryId);
             return;
         }
 
-        log.info("[5KA] ⬇️  Получили список товаров для категории {} ({} байт)", categoryId, resp.body().length);
+        log.info("[Пятерочка] ⬇️  Получили список товаров для категории {} ({} байт)", categoryId, resp.body().length);
         handleProductsResponse(resp.body());
 
         // 3. возвращаемся обратно к списку категорий
@@ -170,73 +172,42 @@ public class FiveKaUpdateService {
             if (productsNode != null && productsNode.isArray()) {
                 saveProducts(productsNode);
             } else {
-                log.info("[5KA] Пустой или неверный массив products ({} байт)", body.length);
+                log.info("[Пятерочка] Пустой или неверный массив products ({} байт)", body.length);
             }
         } catch (Exception e) {
-            log.error("[5KA] ❌ Ошибка обработки продуктов", e);
+            log.error("[Пятерочка] ❌ Ошибка обработки продуктов", e);
         }
     }
 
     /* ============================== сохранение в БД ============================== */
-private void saveProducts(JsonNode products) {
-    Delivery delivery = deliveryRepository.findByName("5ka").orElseGet(() -> {
-        Delivery d = new Delivery();
-        d.setName("5ka");
-        d.setUrl("https://5ka.ru");
-        return deliveryRepository.save(d);
-    });
-
-    for (JsonNode p : products) {
-        String name = p.path("name").asText();
-        JsonNode pricesNode = p.path("prices");
-
-        String priceStr = pricesNode.path("discount").isNull()
-            ? pricesNode.path("regular").asText()
-            : pricesNode.path("discount").asText();
-
-        if (priceStr == null || priceStr.isBlank()) {
-            log.info("[5KA] '{}' – нет цены, пропускаем", name);
-            continue;
-        }
-        BigDecimal price = new BigDecimal(priceStr);
-
-        // Ищем товар с ТОЧНЫМ именем в этом сервисе
-        Optional<Product> existingProduct = productRepository.findByNameAndPrices_Service(name, delivery);
-
-        if (existingProduct.isPresent()) {
-            // Товар есть в этом сервисе - проверяем цену
-            Product product = existingProduct.get();
-            product.getPrices().stream()
-                .filter(pp -> pp.getService().getId().equals(delivery.getId()))
-                .findFirst()
-                .ifPresent(pp -> {
-                    if (pp.getPrice().compareTo(price) != 0) {
-                        log.info("[5KA] ⬆️ Обновляем цену '{}' с {} на {}", name, pp.getPrice(), price);
-                        pp.setPrice(price);
-                        productRepository.save(product);
-                    }
-                });
-            continue;
-        }
-
-        // Если нет в этом сервисе, ищем в других
-        productRepository.findByNameCleaned(name).ifPresentOrElse(prod -> {
-            // Добавляем цену от 5ka к существующему товару
-            log.info("[5KA] ➕ Добавляем цену 5ka к товару '{}' = {}", name, price);
-            prod.getPrices().add(new ProductPrice(null, prod, delivery, price));
-            productRepository.save(prod);
-        }, () -> {
-            // Если товара нет нигде - создаем новый
-            log.info("[5KA] 🆕 Создаём новый товар '{}' = {}", name, price);
-            Product newProd = new Product();
-            newProd.setName(name);
-            newProd.setDescription("Parsed from 5ka");
-            newProd.getPrices().add(new ProductPrice(null, newProd, delivery, price));
-            productRepository.save(newProd);
+    private void saveProducts(JsonNode products) {
+        Delivery delivery = deliveryRepository.findByName("Пятерочка").orElseGet(() -> {
+            Delivery d = new Delivery();
+            d.setName("Пятерочка");
+            d.setUrl("https://5ka.ru");
+            return deliveryRepository.save(d);
         });
+
+        for (JsonNode p : products) {
+            String name = p.path("name").asText();
+            JsonNode pricesNode = p.path("prices");
+
+            String priceStr = pricesNode.path("discount").isNull()
+                    ? pricesNode.path("regular").asText()
+                    : pricesNode.path("discount").asText();
+
+            if (priceStr == null || priceStr.isBlank()) {
+                log.info("[Пятерочка] '{}' – нет цены, пропускаем", name);
+                continue;
+            }
+            BigDecimal price = new BigDecimal(priceStr);
+
+            productService.updateOrSaveProduct(delivery, name, price);
+
+        }
     }
-}
-        private void scrollUntilNoNewProducts(Page page) {
+
+    private void scrollUntilNoNewProducts(Page page) {
         int sameCountTimes = 0;
         while (sameCountTimes < 3) {
             int currentCount = page.locator(".productFilterGrid_cardContainer__oyUJZ").count();

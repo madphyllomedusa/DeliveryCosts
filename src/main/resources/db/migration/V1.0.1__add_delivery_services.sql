@@ -1,3 +1,3 @@
 INSERT INTO delivery_service (name, url)
-VALUES ('Яндекс лавка', 'https://lavka.yandex.ru/'),
+VALUES ('Пятерочка', 'https://5ka.ru/'),
        ('Самокат','https://samokat.ru/');

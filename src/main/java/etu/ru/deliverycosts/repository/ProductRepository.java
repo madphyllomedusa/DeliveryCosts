@@ -25,4 +25,7 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
                                                @Param("delivery") Delivery delivery);
 
     Optional <Product> findByName(String name);
+
+    Optional<Product> findByNormalizedName(String normalizedName);
+
 }
