@@ -15,9 +15,9 @@ public class TestController {
 
     @GetMapping("/test")
     public void getCategories() {
-        fiveKaUpdateService.updateFiveKaData();
-        //lentaUpdateService.updateLentaData();
         //samokatUpdateService.updateSamokatData();
+        fiveKaUpdateService.updateFiveKaData();
+
     }
 }
 

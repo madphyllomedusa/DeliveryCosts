@@ -24,6 +24,7 @@ import java.math.BigDecimal;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -31,10 +32,6 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Slf4j
 @RequiredArgsConstructor
 public class FiveKaUpdateService {
-
-    private static final String STORE_ID = "Y232";
-    private static final String BASE_API =
-            "https://5d.5ka.ru/api/catalog/v2/stores/%s/categories/%s/products?offset=0&limit=500";
 
     private final ObjectMapper objectMapper;
     private final ProductRepository productRepository;
@@ -64,8 +61,8 @@ public class FiveKaUpdateService {
             // перехватываем все ответы — там лежат категории и товары
             ctx.onResponse(this::intercept);
 
-                page.navigate("https://5ka.ru/catalog",
-                        new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
+            page.navigate("https://5ka.ru/catalog",
+                    new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
             log.info("[5KA] Открыли каталог, ждём сетевые ответы с категориями …");
             page.waitForTimeout(15_000);
 
@@ -181,52 +178,64 @@ public class FiveKaUpdateService {
     }
 
     /* ============================== сохранение в БД ============================== */
-    private void saveProducts(JsonNode products) {
-        Delivery delivery = deliveryRepository.findByName("5ka").orElseGet(() -> {
-            Delivery d = new Delivery();
-            d.setName("5ka");
-            d.setUrl("https://5ka.ru");
-            return deliveryRepository.save(d);
-        });
+private void saveProducts(JsonNode products) {
+    Delivery delivery = deliveryRepository.findByName("5ka").orElseGet(() -> {
+        Delivery d = new Delivery();
+        d.setName("5ka");
+        d.setUrl("https://5ka.ru");
+        return deliveryRepository.save(d);
+    });
 
-        for (JsonNode p : products) {
-            String name = p.path("name").asText();
-            JsonNode pricesNode = p.path("prices");
+    for (JsonNode p : products) {
+        String name = p.path("name").asText();
+        JsonNode pricesNode = p.path("prices");
 
-            String priceStr = pricesNode.path("discount").isNull() ? pricesNode.path("regular").asText() : pricesNode.path("discount").asText();
-            if (priceStr == null || priceStr.isBlank()) {
-                log.info("[5KA] '{}' – нет цены, пропускаем", name);
-                continue;
-            }
-            BigDecimal price = new BigDecimal(priceStr);
+        String priceStr = pricesNode.path("discount").isNull()
+            ? pricesNode.path("regular").asText()
+            : pricesNode.path("discount").asText();
 
-            productRepository.findByName(name).ifPresentOrElse(prod -> {
-                // обновляем цену
-                prod.getPrices().stream()
-                        .filter(pp -> pp.getService().getId().equals(delivery.getId()))
-                        .findFirst()
-                        .ifPresentOrElse(pp -> {
-                            if (pp.getPrice().compareTo(price) != 0) {
-                                log.info("[5KA] ⬆️  Обновляем цену '{}' с {} на {}", name, pp.getPrice(), price);
-                                pp.setPrice(price);
-                            }
-                        }, () -> {
-                            log.info("[5KA] ➕ Добавляем новую цену для существующего товара '{}' = {}", name, price);
-                            prod.getPrices().add(new ProductPrice(null, prod, delivery, price));
-                        });
-                productRepository.save(prod);
-            }, () -> {
-                // новый товар
-                log.info("[5KA] 🆕 Создаём новый товар '{}' = {}", name, price);
-                Product newProd = new Product();
-                newProd.setName(name);
-                newProd.setDescription("Parsed from 5ka");
-                newProd.getPrices().add(new ProductPrice(null, newProd, delivery, price));
-                productRepository.save(newProd);
-            });
+        if (priceStr == null || priceStr.isBlank()) {
+            log.info("[5KA] '{}' – нет цены, пропускаем", name);
+            continue;
         }
-    }
+        BigDecimal price = new BigDecimal(priceStr);
 
+        // Ищем товар с ТОЧНЫМ именем в этом сервисе
+        Optional<Product> existingProduct = productRepository.findByNameAndPrices_Service(name, delivery);
+
+        if (existingProduct.isPresent()) {
+            // Товар есть в этом сервисе - проверяем цену
+            Product product = existingProduct.get();
+            product.getPrices().stream()
+                .filter(pp -> pp.getService().getId().equals(delivery.getId()))
+                .findFirst()
+                .ifPresent(pp -> {
+                    if (pp.getPrice().compareTo(price) != 0) {
+                        log.info("[5KA] ⬆️ Обновляем цену '{}' с {} на {}", name, pp.getPrice(), price);
+                        pp.setPrice(price);
+                        productRepository.save(product);
+                    }
+                });
+            continue;
+        }
+
+        // Если нет в этом сервисе, ищем в других
+        productRepository.findByNameCleaned(name).ifPresentOrElse(prod -> {
+            // Добавляем цену от 5ka к существующему товару
+            log.info("[5KA] ➕ Добавляем цену 5ka к товару '{}' = {}", name, price);
+            prod.getPrices().add(new ProductPrice(null, prod, delivery, price));
+            productRepository.save(prod);
+        }, () -> {
+            // Если товара нет нигде - создаем новый
+            log.info("[5KA] 🆕 Создаём новый товар '{}' = {}", name, price);
+            Product newProd = new Product();
+            newProd.setName(name);
+            newProd.setDescription("Parsed from 5ka");
+            newProd.getPrices().add(new ProductPrice(null, newProd, delivery, price));
+            productRepository.save(newProd);
+        });
+    }
+}
         private void scrollUntilNoNewProducts(Page page) {
         int sameCountTimes = 0;
         while (sameCountTimes < 3) {
