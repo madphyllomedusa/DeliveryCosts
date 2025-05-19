@@ -5,15 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
-import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.Response;
 import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitUntilState;
 import etu.ru.deliverycosts.model.entity.Delivery;
-import etu.ru.deliverycosts.model.entity.Product;
-import etu.ru.deliverycosts.model.entity.ProductPrice;
 import etu.ru.deliverycosts.repository.DeliveryRepository;
 import etu.ru.deliverycosts.repository.ProductRepository;
 import etu.ru.deliverycosts.service.ProductService;
@@ -25,7 +22,6 @@ import java.math.BigDecimal;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -137,19 +133,11 @@ public class FiveKaUpdateService {
 
     /* ============================== товары ============================== */
     private void fetchProducts(String categoryId) {
-        // 1. находим ссылку плитки категории
-        Locator link = page.locator(String.format("a[data-category-id='%s'], a[href*='%s']", categoryId, categoryId)).first();
-
-        if (link.count() == 0) {
-            log.warn("[Пятерочка] ⚠️  Не нашли DOM-ссылку для categoryId={} — пропускаем", categoryId);
-            return;
-        }
-
         String apiPart = "/categories/" + categoryId + "/products";
 
-        // 2. ждём XHR с товарами именно для этой категории
         Response resp = page.waitForResponse(r -> r.url().contains(apiPart) && r.status() == 200, () -> {
-            link.click();           // триггер — клик в меню
+            page.navigate("https://5ka.ru/catalog/" + categoryId, new Page.NavigateOptions()
+                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
             scrollUntilNoNewProducts(page);
         });
 
@@ -161,10 +149,10 @@ public class FiveKaUpdateService {
         log.info("[Пятерочка] ⬇️  Получили список товаров для категории {} ({} байт)", categoryId, resp.body().length);
         handleProductsResponse(resp.body());
 
-        // 3. возвращаемся обратно к списку категорий
         page.goBack(new Page.GoBackOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
         page.waitForLoadState(LoadState.DOMCONTENTLOADED);
     }
+
 
     private void handleProductsResponse(byte[] body) {
         try {

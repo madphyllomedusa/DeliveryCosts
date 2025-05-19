@@ -4,7 +4,6 @@ import etu.ru.deliverycosts.model.entity.Delivery;
 import etu.ru.deliverycosts.model.entity.Product;
 import etu.ru.deliverycosts.model.entity.ProductPrice;
 import etu.ru.deliverycosts.repository.ProductRepository;
-import etu.ru.deliverycosts.service.DeliveryService;
 import etu.ru.deliverycosts.service.ProductService;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
@@ -25,14 +24,12 @@ public class ProductServiceImpl implements ProductService {
      */
     @Override
     @Transactional
-    public void updateOrSaveProduct(Delivery delivery, String originalName, BigDecimal price) {
-        String normName = Product.normalize(originalName);
+    public void updateOrSaveProduct(Delivery delivery, String name, BigDecimal price) {
+        String normName = Product.normalize(name);
 
         productRepository.findByNormalizedName(normName)
                 .ifPresentOrElse(prod -> {
-                    // защитимся от null в description
                     String desc = Optional.ofNullable(prod.getDescription()).orElse("");
-
                     prod.getPrices().stream()
                             .filter(pp -> pp.getService().getId().equals(delivery.getId()))
                             .findFirst()
@@ -49,15 +46,14 @@ public class ProductServiceImpl implements ProductService {
                                 prod.getPrices().add(new ProductPrice(null, prod, delivery, price));
                                 log.info("[{}] Добавили цену {}: {}", delivery.getName(), prod.getName(), price);
                             });
-                    // одно сохранение в конце
                     productRepository.save(prod);
                 }, () -> {
                     Product np = new Product();
-                    np.setName(originalName); // тут normalizedName проставится автоматически
+                    np.setName(name);
                     np.setDescription("Parsed from " + delivery.getName());
                     np.getPrices().add(new ProductPrice(null, np, delivery, price));
                     productRepository.save(np);
-                    log.info("[{}] Создали {}: {}", delivery.getName(), originalName, price);
+                    log.info("[{}] Создали {}: {}", delivery.getName(), name, price);
                 });
     }
 

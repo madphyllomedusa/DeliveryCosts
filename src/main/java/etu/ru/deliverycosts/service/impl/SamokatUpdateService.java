@@ -14,15 +14,12 @@ import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitForSelectorState;
 import com.microsoft.playwright.options.WaitUntilState;
 import etu.ru.deliverycosts.model.entity.Delivery;
-import etu.ru.deliverycosts.model.entity.Product;
-import etu.ru.deliverycosts.model.entity.ProductPrice;
 import etu.ru.deliverycosts.repository.DeliveryRepository;
 import etu.ru.deliverycosts.repository.ProductRepository;
 import etu.ru.deliverycosts.service.ProductService;
 import etu.ru.deliverycosts.util.samokat.SamokatCategoryInfo;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
