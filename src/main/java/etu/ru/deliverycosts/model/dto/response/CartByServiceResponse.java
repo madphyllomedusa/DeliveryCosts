@@ -10,4 +10,5 @@ import java.math.BigDecimal;
 public class CartByServiceResponse {
     private String serviceName;
     private BigDecimal totalPrice;
+    private boolean allAvailable;
 }

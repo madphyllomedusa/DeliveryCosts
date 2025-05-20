@@ -4,28 +4,34 @@ import etu.ru.deliverycosts.model.dto.response.CartByServiceResponse;
 import etu.ru.deliverycosts.model.dto.response.CartResponse;
 import etu.ru.deliverycosts.model.dto.response.ProductPriceResponse;
 import etu.ru.deliverycosts.model.dto.response.ProductResponse;
+import etu.ru.deliverycosts.model.entity.Delivery;
 import etu.ru.deliverycosts.model.entity.Product;
 import etu.ru.deliverycosts.model.entity.ProductPrice;
+import etu.ru.deliverycosts.repository.DeliveryRepository;
 import etu.ru.deliverycosts.repository.ProductPriceRepository;
 import etu.ru.deliverycosts.repository.ProductRepository;
 import etu.ru.deliverycosts.service.CartService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Scope;
+import org.springframework.context.annotation.ScopedProxyMode;
 import org.springframework.stereotype.Service;
+import org.springframework.web.context.WebApplicationContext;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.Optional;
 
 @Service
+@Scope(value = WebApplicationContext.SCOPE_SESSION, proxyMode = ScopedProxyMode.TARGET_CLASS)
 @RequiredArgsConstructor
 public class CartServiceImpl implements CartService {
-    private final ProductRepository productRepo;
-    private final ProductPriceRepository priceRepo;
+    private final ProductRepository productRepository;
+    private final DeliveryRepository deliveryRepository;
+    private final ProductPriceRepository productPriceRepository;
 
-    // в сессии храним только ID товаров
     private final List<Long> cart = new ArrayList<>();
 
     @Override
@@ -40,48 +46,58 @@ public class CartServiceImpl implements CartService {
 
     @Override
     public CartResponse getCart() {
-        // 1) получаем все продукты
-        addProduct(98L);
-        addProduct(3038L);
-        addProduct(2161L);
-        List<Product> products = productRepo.findAllById(cart);
+        List<Delivery> services = deliveryRepository.findAll();
+        List<Product> products = productRepository.findAllById(cart);
 
-        // 2) строим список ProductResponse
         List<ProductResponse> productResponses = products.stream().map(p -> {
-            // достаём все цены для данного продукта
-            List<ProductPrice> prices = priceRepo.findByProductId(p.getId());
-            List<ProductPriceResponse> priceResponses = prices.stream()
-                    .map(pp -> {
-                        ProductPriceResponse pr = new ProductPriceResponse();
-                        pr.setServiceName(pp.getService().getName());
-                        pr.setPrice(pp.getPrice());
-                        return pr;
+            List<ProductPriceResponse> priceResponses = services.stream()
+                    .map(svc -> {
+                        Optional<BigDecimal> priceOpt = productPriceRepository
+                                .findByProductIdAndServiceId(p.getId(), svc.getId())
+                                .map(ProductPrice::getPrice);
+                        return new ProductPriceResponse(
+                                svc.getName(),
+                                priceOpt.orElse(null)
+                        );
                     })
-                    .collect(Collectors.toList());
+                    .toList();
 
-            ProductResponse resp = new ProductResponse();
+            var resp = new ProductResponse();
             resp.setName(p.getName());
             resp.setPriceByService(priceResponses);
             return resp;
-        }).collect(Collectors.toList());
+        }).toList();
 
-        // 3) группируем по serviceName и суммируем цену каждого продукта
-        Map<String, BigDecimal> totals = new HashMap<>();
-        for (ProductResponse pr : productResponses) {
-            for (ProductPriceResponse ppr : pr.getPriceByService()) {
-                totals.merge(
-                        ppr.getServiceName(),
-                        ppr.getPrice(),
-                        BigDecimal::add
-                );
+        // 3) Группируем и суммируем итоговые суммы по каждому сервису,
+        //    а также считаем количество доступных позиций:
+        Map<String, BigDecimal> sums = new HashMap<>();
+        Map<String, Long> counts = new HashMap<>();
+
+        for (var pr : productResponses) {
+            for (var pp : pr.getPriceByService()) {
+                String svc = pp.getServiceName();
+                BigDecimal price = pp.getPrice();
+                // Суммируем только существующие цены
+                sums.merge(svc, price != null ? price : BigDecimal.ZERO, BigDecimal::add);
+                // Считаем, в скольких товарах сервис присутствует
+                if (price != null) {
+                    counts.merge(svc, 1L, Long::sum);
+                }
             }
         }
 
-        // 4) формируем DTO для итогов по сервисам
-        List<CartByServiceResponse> byService = totals.entrySet().stream()
-                .map(e -> new CartByServiceResponse(e.getKey(), e.getValue()))
-                .collect(Collectors.toList());
+        // 4) Формируем DTO CartByServiceResponse с флагом allAvailable
+        int totalProducts = productResponses.size();
+        List<CartByServiceResponse> byService = sums.entrySet().stream()
+                .map(e -> new CartByServiceResponse(
+                        e.getKey(),
+                        e.getValue(),
+                        counts.getOrDefault(e.getKey(), 0L) == totalProducts  // true, если цена есть у всех товаров
+                ))
+                .toList();
 
+        // 5) Возвращаем конечный объект CartResponse
         return new CartResponse(productResponses, byService);
     }
+
 }
